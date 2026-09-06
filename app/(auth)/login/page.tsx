@@ -89,7 +89,6 @@ function LoginForm() {
                   autoCapitalize="none"
                   autoCorrect="off"
                   autoComplete="username"
-                  placeholder="e.g. alex or master"
                   value={username}
                   onChange={(e) => {
                     setUsername(e.target.value);
@@ -130,9 +129,6 @@ function LoginForm() {
                     className="w-full rounded-xl bg-white border border-slate-300 pl-9 pr-3.5 py-2.5 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm tracking-widest transition-all focus:border-emerald-500 focus:outline-none focus:ring-4 focus:ring-emerald-500/10"
                   />
                 </div>
-                <p className="text-xs text-slate-500">
-                  Default seeded master PIN is 1234.
-                </p>
               </div>
             )}
 
