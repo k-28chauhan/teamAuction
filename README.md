@@ -1,5 +1,17 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+Turf — a group of friends splitting into two fair teams for 5-a-side/6-a-side football, via a credit auction or a balanced shuffle. See `00-shared-contract.md` and `02-backend-prd.md` for the full spec this backend implements.
+
+## Backend setup
+
+1. Start a Postgres instance and set `DATABASE_URL`, `AUTH_SECRET`, `NODE_ENV` (copy `.env.example` to `.env.local`). A throwaway local database works well via Docker:
+   ```bash
+   docker run -d --name turf-db -e POSTGRES_PASSWORD=turf -e POSTGRES_DB=turf -p 55432:5432 postgres:16-alpine
+   ```
+2. Run migrations: `npm run db:migrate`
+3. Seed sample data (a master account `master`/PIN `1234`, 15 players, 3 completed matchdays): `npm run db:seed`
+4. Run the unit test suite (the draft engine and split search, no database needed): `npm test`
+
 ## Getting Started
 
 First, run the development server:

@@ -1,0 +1,1 @@
+ALTER TABLE "matchday_players" ADD COLUMN "goals" smallint DEFAULT 0 NOT NULL;
