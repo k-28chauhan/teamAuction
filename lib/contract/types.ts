@@ -36,6 +36,12 @@ export type MatchdayScorer = {
   goals: number;
 };
 
+/** What a player was won for at auction (credits). 0 = auto-filled at no cost. Omitted for captains and shuffle matches. */
+export type MatchdayPrice = {
+  userId: string;
+  price: number;
+};
+
 export type Matchday = {
   id: string;
   status: MatchdayStatus;
@@ -50,6 +56,7 @@ export type Matchday = {
   scoreA: number | null;
   scoreB: number | null;
   scorers: MatchdayScorer[];
+  prices: MatchdayPrice[];
   createdAt: string;
   playedAt: string | null;
 };

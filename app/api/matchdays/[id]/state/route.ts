@@ -40,6 +40,11 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     // fall back to profile data and show the wrong role mid-draft.
     const playersByUser = await getMatchdayPlayers(id);
     const roster = [...playersByUser.values()].map((entry) => serializePlayer(entry.user, entry.position));
+    // What each already-sold player went for, so the live decks can show the record as it builds.
+    const prices: Record<string, number> = {};
+    for (const [userId, entry] of playersByUser) {
+      if (entry.price !== null) prices[userId] = entry.price;
+    }
 
     return NextResponse.json(
       {
@@ -47,6 +52,7 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
         version: row.version,
         permissions: computePermissions({ isMaster: user.isMaster, team, canAct }),
         roster,
+        prices,
       },
       { headers: { ETag: etag, ...noCacheHeaders } }
     );

@@ -140,7 +140,7 @@ type Position = 'GK' | 'DEF' | 'MID' | 'FWD';
 type DraftState = {
   phase: 'nominate' | 'respond' | 'bidding' | 'complete';
   turn: Team;                    // whose turn it is to nominate
-  currentRound: Position | null; // position being auctioned right now
+  currentRound: Position | null; // legacy — always null; the auction has no position rounds
   poolIds: string[];             // unsold players
   teams: Record<Team, {
     leaderId: string;
@@ -159,23 +159,21 @@ type DraftState = {
 
 ### Auction rules — enforce every one of these on the server
 
-**Starting price.** Every player has a reserve price set from their rating (`basePriceForRating(rating) = max(1, round(rating))`) — a nomination price, and the opening bid in open-style auctions, may never be below it. Below-floor nominations are rejected with `422 BELOW_BASE_PRICE`.
+**Starting price.** Every player has the same flat reserve price of 5 credits, regardless of rating — a nomination price, and the opening bid in open-style auctions, may never be below it. Below-floor nominations are rejected with `422 BELOW_BASE_PRICE`.
 
 **Budget cap.** A leader may never bid so much that they can no longer complete their squad. The reserve isn't a flat 1 credit per empty slot — it's the combined starting price of the cheapest players still legally available to that team, one per remaining slot, recomputed fresh on every action (so it tightens automatically as the cheap end of the pool sells):
 
 ```
 maxBid(team) = team.budget - sum(startingPrice(p) for p in cheapest N eligible pool players)
   where N = teamSize - team.playerIds.length - 1 (after this pick)
-  and "eligible" excludes any position the team is already capped on (see below)
+  and "eligible" is any player still in the pool (there are no position limits)
 ```
 
 Any nomination price or raise above this is rejected with `422 EXCEEDS_MAX_BID`.
 
-**Position rounds.** `currentRound` is the first position in `round_order` that still has an unsold player. Only players of that position may be nominated. When the round empties, advance automatically.
+**No categories.** There are no position rounds or position caps: on their turn a captain may put **any** unsold player up for bid. Positions are display-only labels during the auction. `currentRound` is kept in the type for compatibility but is always `null`; `POSITION_LIMIT` is no longer returned.
 
-**Position cap.** No side may hold more than half (rounded up) of the squad's whole supply of any one position — `cap(position) = ceil(totalOfPosition / 2)`. An odd supply still splits fairly (5 forwards → cap 3, worst split 3-2, never 4-1). This generalises what used to be a keeper-only rule to every position — GK included, since `ceil(n/2)` already guarantees both sides get one keeper whenever n ≥ 2. Exceeding it is rejected with `422 POSITION_LIMIT`.
-
-**Turn.** Alternates on every resolution, regardless of who won the player. If the team whose turn it is has no eligible player this round — because of the position cap — the turn passes to the other team. If neither can act, advance the round.
+**Turn.** Alternates on every resolution, regardless of who won the player. If the team whose turn it is cannot afford to nominate anyone (max bid below the starting bid), the turn passes to the other team.
 
 **Auto-fill.** The moment one team reaches `team_size`, every remaining player in the pool is assigned to the other team at zero cost, an `autofill` event is written, and the phase becomes `complete`.
 
@@ -266,7 +264,8 @@ POST   /api/matchdays/:id/respond   leader { action }     -> { state, version }
 POST   /api/matchdays/:id/bid       leader { action, amount } -> { state, version }
 POST   /api/matchdays/:id/shuffle   leader|master         -> { split, splitId, diff, legalCount }
 POST   /api/matchdays/:id/lock      leader|master { splitId } -> { matchday }
-POST   /api/matchdays/:id/result    leader|master { scoreA, scoreB } -> { matchday }
+POST   /api/matchdays/:id/result    leader (teams_set) | master (teams_set or completed) { scoreA, scoreB, scorers?: [{userId, goals}] } -> { matchday }
+                                    scorers omitted = leave as-is; [] = clear all; non-empty must sum to each team's score
 
 GET    /api/leaderboard                                   -> { rows: LeaderboardRow[] }
 ```

@@ -1,4 +1,4 @@
-import type { Matchday, MatchdayScorer, Permissions, Player, Position, Team } from '@/lib/contract/types';
+import type { Matchday, MatchdayPrice, MatchdayScorer, Permissions, Player, Position, Team } from '@/lib/contract/types';
 
 export type UserRow = {
   id: string;
@@ -47,15 +47,17 @@ export type MatchdayRow = {
 
 export function serializeMatchday(
   row: MatchdayRow,
-  playersByUser: Map<string, { team: 'A' | 'B' | null; goals?: number; position?: Position; user: UserRow }>
+  playersByUser: Map<string, { team: 'A' | 'B' | null; goals?: number; price?: number | null; position?: Position; user: UserRow }>
 ): Matchday {
   const teamA: Player[] = [];
   const teamB: Player[] = [];
   const scorers: MatchdayScorer[] = [];
-  for (const [userId, { team, goals, position, user }] of playersByUser) {
+  const prices: MatchdayPrice[] = [];
+  for (const [userId, { team, goals, price, position, user }] of playersByUser) {
     if (team === 'A') teamA.push(serializePlayer(user, position));
     if (team === 'B') teamB.push(serializePlayer(user, position));
     if (goals) scorers.push({ userId, goals });
+    if (price !== null && price !== undefined) prices.push({ userId, price });
   }
 
   const leaderEntryA = row.leaderAId ? playersByUser.get(row.leaderAId) : undefined;
@@ -75,6 +77,7 @@ export function serializeMatchday(
     scoreA: row.scoreA,
     scoreB: row.scoreB,
     scorers,
+    prices,
     createdAt: row.createdAt,
     playedAt: row.playedAt,
   };

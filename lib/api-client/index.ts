@@ -236,12 +236,19 @@ export async function cancelMatchday(id: string): Promise<{ ok: boolean }> {
   return request<{ ok: boolean }>(`/api/matchdays/${id}/cancel`, { method: 'POST' });
 }
 
+export async function deleteMatchday(id: string): Promise<{ ok: boolean }> {
+  if (USE_MOCKS) {
+    return mockHandlers.deleteMatchday(id);
+  }
+  return request<{ ok: boolean }>(`/api/matchdays/${id}`, { method: 'DELETE' });
+}
+
 // ---------------- DRAFT & LIVE ----------------
 
 export async function getMatchdayState(
   id: string,
   lastVersion?: number
-): Promise<{ state: DraftState; version: number; permissions: Permissions; roster: Player[]; notModified?: boolean }> {
+): Promise<{ state: DraftState; version: number; permissions: Permissions; roster: Player[]; prices?: Record<string, number>; notModified?: boolean }> {
   if (USE_MOCKS) {
     return mockHandlers.getMatchdayState(id);
   }

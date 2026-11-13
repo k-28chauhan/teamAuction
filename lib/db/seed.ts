@@ -2,7 +2,7 @@ import postgres from 'postgres';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { draftEvents, matchdayPlayers, matchdays, users } from '@/lib/db/schema';
 import { hashPin } from '@/lib/auth/pin';
-import { basePriceForRating, createInitialAuctionState } from '@/lib/draft/engine';
+import { STARTING_BID, createInitialAuctionState } from '@/lib/draft/engine';
 import type { DraftState, Position } from '@/lib/contract/types';
 
 // Karaninder is seeded as master (matches the signed-in operator of this app).
@@ -63,7 +63,6 @@ async function main() {
   }
 
   const byUsername = new Map(inserted.map((u) => [u.username, u]));
-  const roundOrder: Position[] = ['GK', 'FWD', 'MID', 'DEF'];
 
   // Three completed matchdays, alternating leaders and squad size, with a played score.
   const historicalGroups: { players: string[]; leaderA: string; leaderB: string; scoreA: number; scoreB: number }[] = [
@@ -112,25 +111,15 @@ async function main() {
     const leaderB = byUsername.get(group.leaderB)!;
     const teamSize = playerRows.length / 2;
 
-    const positionOf: Record<string, Position> = {};
-    const ratingOf: Record<string, number> = {};
-    for (const row of playerRows) {
-      positionOf[row.id] = row.position;
-      ratingOf[row.id] = row.rating;
-    }
     const poolIds = playerRows.map((r) => r.id).filter((id) => id !== leaderA.id && id !== leaderB.id);
 
-    const avgRating = playerRows.reduce((sum, r) => sum + r.rating, 0) / playerRows.length;
-    const budget = Math.ceil(teamSize * avgRating * 1.5);
+    const budget = Math.ceil(teamSize * STARTING_BID * 1.5);
     const initialState = createInitialAuctionState({
       leaderAId: leaderA.id,
       leaderBId: leaderB.id,
       poolIds,
       budget,
       teamSize,
-      roundOrder,
-      positionOf,
-      ratingOf,
     });
 
     // For seed purposes, split the pool evenly between the two teams rather
@@ -155,7 +144,7 @@ async function main() {
         method: 'auction',
         style: 'price',
         budget,
-        roundOrder,
+        roundOrder: null,
         teamSize,
         leaderAId: leaderA.id,
         leaderBId: leaderB.id,
@@ -172,7 +161,7 @@ async function main() {
         matchdayId: matchday!.id,
         userId: row.id,
         team: finalState.teams.A.playerIds.includes(row.id) ? ('A' as const) : ('B' as const),
-        price: row.id === leaderA.id || row.id === leaderB.id ? null : basePriceForRating(row.rating),
+        price: row.id === leaderA.id || row.id === leaderB.id ? null : STARTING_BID,
         position: row.position,
       }))
     );

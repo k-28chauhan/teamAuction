@@ -240,6 +240,7 @@ export const mockHandlers = {
       scoreA: null,
       scoreB: null,
       scorers: [],
+      prices: [],
       createdAt: new Date().toISOString(),
       playedAt: null,
     };
@@ -262,6 +263,20 @@ export const mockHandlers = {
     const matchday = mockStore.matchdays.find((m) => m.id === id);
     if (!matchday) throw new MockApiError('NOT_FOUND', "That matchday doesn't exist.", 404);
     matchday.status = 'cancelled';
+    if (mockStore.currentMatchdayId === id) {
+      mockStore.currentMatchdayId = null;
+    }
+    return { ok: true };
+  },
+
+  deleteMatchday: async (id: string) => {
+    const idx = mockStore.matchdays.findIndex((m) => m.id === id);
+    if (idx === -1) throw new MockApiError('NOT_FOUND', "That matchday doesn't exist.", 404);
+    const matchday = mockStore.matchdays[idx]!;
+    if (matchday.status !== 'completed' && matchday.status !== 'cancelled') {
+      throw new MockApiError('WRONG_PHASE', 'Only a completed or cancelled matchday can be deleted — cancel it first.', 422);
+    }
+    mockStore.matchdays.splice(idx, 1);
     if (mockStore.currentMatchdayId === id) {
       mockStore.currentMatchdayId = null;
     }

@@ -1,9 +1,9 @@
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
-import { draftEvents, matchdayPlayers, matchdays, users } from '@/lib/db/schema';
+import { draftEvents, matchdayPlayers, matchdays } from '@/lib/db/schema';
 import { appError } from '@/lib/api/errors';
 import { reduce, type DraftAction, type DraftContext } from '@/lib/draft/engine';
-import type { DraftState, Position, Team } from '@/lib/contract/types';
+import type { DraftState, Team } from '@/lib/contract/types';
 
 /**
  * The shared shape of every mutating draft endpoint (nominate/respond/bid):
@@ -38,25 +38,9 @@ export async function runDraftMutation(args: {
       });
     }
 
-    const memberRows = await tx
-      .select({ userId: matchdayPlayers.userId, position: matchdayPlayers.position, rating: users.rating })
-      .from(matchdayPlayers)
-      .innerJoin(users, eq(users.id, matchdayPlayers.userId))
-      .where(eq(matchdayPlayers.matchdayId, args.matchdayId));
-
-    const positionOf: Record<string, Position> = {};
-    const ratingOf: Record<string, number> = {};
-    for (const m of memberRows) {
-      positionOf[m.userId] = m.position;
-      ratingOf[m.userId] = m.rating;
-    }
-
     const ctx: DraftContext = {
       teamSize: row.teamSize,
-      roundOrder: row.roundOrder ?? ['GK', 'FWD', 'MID', 'DEF'],
       style: (row.style ?? 'price') as 'price' | 'open',
-      positionOf,
-      ratingOf,
     };
 
     const action = args.buildAction(ctx);

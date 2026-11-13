@@ -9,7 +9,7 @@ import { appError } from '@/lib/api/errors';
 import { serializeMatchday } from '@/lib/api/serialize';
 import { requireUser, requireMaster } from '@/lib/auth/guards';
 import { getActiveMatchday, getMatchdayPlayers, insertMatchday, listMatchdaysPage } from '@/lib/db/repo';
-import { createInitialAuctionState } from '@/lib/draft/engine';
+import { createInitialAuctionState, STARTING_BID } from '@/lib/draft/engine';
 import { findLegalSplits } from '@/lib/draft/splits';
 import type { DraftState, Position } from '@/lib/contract/types';
 
@@ -22,10 +22,6 @@ const createSchema = z.object({
   method: z.enum(['auction', 'shuffle']),
   style: z.enum(['price', 'open']).optional(),
   budget: z.number().int().min(1).optional(),
-  roundOrder: z.array(positionSchema).optional(),
-  // The role each player will fill for THIS matchday, keyed by player id.
-  // Optional — falls back to each player's profile position when omitted.
-  positions: z.record(z.string().uuid(), positionSchema).optional(),
 });
 
 export const GET = withErrorBoundary(async (req: NextRequest) => {
@@ -65,22 +61,12 @@ export const POST = withErrorBoundary(async (req: NextRequest) => {
   if (rows.length !== data.playerIds.length || rows.some((r) => !r.isActive)) {
     throw appError('VALIDATION_ERROR', 'One of those players is no longer on the active roster.');
   }
-  if (data.positions) {
-    const missing = data.playerIds.filter((id) => !data.positions![id]);
-    if (missing.length > 0) {
-      throw appError('VALIDATION_ERROR', 'Every selected player needs a position assigned for this matchday.');
-    }
-  }
 
   const teamSize = data.playerIds.length / 2;
   const positionOf: Record<string, Position> = {};
-  const ratingOf: Record<string, number> = {};
   for (const row of rows) {
-    // The role assigned for tonight, if given — otherwise their profile default.
-    positionOf[row.id] = data.positions?.[row.id] ?? row.position;
-    ratingOf[row.id] = row.rating;
+    positionOf[row.id] = row.position;
   }
-  const roundOrder = data.roundOrder ?? (['GK', 'FWD', 'MID', 'DEF'] as Position[]);
   const poolIds = data.playerIds.filter((id) => id !== data.leaderAId && id !== data.leaderBId);
 
   let state: DraftState;
@@ -89,18 +75,14 @@ export const POST = withErrorBoundary(async (req: NextRequest) => {
 
   if (data.method === 'auction') {
     style = data.style ?? 'price';
-    // Enough for every player at their rating-based starting price, plus 50% headroom to actually bid.
-    const avgRating = rows.reduce((sum, r) => sum + r.rating, 0) / rows.length;
-    budget = data.budget ?? Math.ceil(teamSize * avgRating * 1.5);
+    // Enough for every player at the flat starting bid, plus 50% headroom to actually bid.
+    budget = data.budget ?? Math.ceil(teamSize * STARTING_BID * 1.5);
     state = createInitialAuctionState({
       leaderAId: data.leaderAId,
       leaderBId: data.leaderBId,
       poolIds,
       budget,
       teamSize,
-      roundOrder,
-      positionOf,
-      ratingOf,
     });
   } else {
     const splitPlayers = rows.map((r) => ({ id: r.id, position: positionOf[r.id]!, rating: r.rating }));
@@ -131,7 +113,7 @@ export const POST = withErrorBoundary(async (req: NextRequest) => {
     method: data.method,
     style,
     budget,
-    roundOrder,
+    roundOrder: null,
     teamSize,
     leaderAId: data.leaderAId,
     leaderBId: data.leaderBId,

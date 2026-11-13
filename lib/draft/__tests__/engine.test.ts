@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  basePriceForRating,
+  STARTING_BID,
   createInitialAuctionState,
   maxBid,
-  positionCap,
   reduce,
   type DraftContext,
 } from '@/lib/draft/engine';
@@ -12,94 +11,46 @@ import type { DraftState, Position } from '@/lib/contract/types';
 const LEADER_A = 'leaderA';
 const LEADER_B = 'leaderB';
 
+// Positions are only labels now — the engine ignores them entirely. They're kept
+// on the fixtures to prove that: any mix of roles can be nominated at any time.
 type TestPlayer = { id: string; position: Position; rating?: number };
 
-function buildCtx(
+function setup(
   players: TestPlayer[],
-  opts: { teamSize: number; style: 'price' | 'open'; roundOrder?: Position[]; leaderRating?: number }
-): DraftContext {
-  const positionOf: Record<string, Position> = { [LEADER_A]: 'MID', [LEADER_B]: 'MID' };
-  const ratingOf: Record<string, number> = {
-    [LEADER_A]: opts.leaderRating ?? 5,
-    [LEADER_B]: opts.leaderRating ?? 5,
-  };
-  for (const p of players) {
-    positionOf[p.id] = p.position;
-    ratingOf[p.id] = p.rating ?? 5;
-  }
-  return {
-    teamSize: opts.teamSize,
-    roundOrder: opts.roundOrder ?? ['GK', 'FWD', 'MID', 'DEF'],
-    style: opts.style,
-    positionOf,
-    ratingOf,
-  };
-}
-
-function buildState(ctx: DraftContext, players: TestPlayer[], budget: number): DraftState {
-  return createInitialAuctionState({
+  opts: { teamSize: number; budget: number; style: 'price' | 'open'; roundOrder?: Position[] }
+) {
+  const ctx: DraftContext = { teamSize: opts.teamSize, style: opts.style };
+  const state: DraftState = createInitialAuctionState({
     leaderAId: LEADER_A,
     leaderBId: LEADER_B,
     poolIds: players.map((p) => p.id),
-    budget,
-    teamSize: ctx.teamSize,
-    roundOrder: ctx.roundOrder,
-    positionOf: ctx.positionOf,
-    ratingOf: ctx.ratingOf,
+    budget: opts.budget,
+    teamSize: opts.teamSize,
   });
-}
-
-function setup(players: TestPlayer[], opts: { teamSize: number; budget: number; style: 'price' | 'open'; roundOrder?: Position[] }) {
-  const ctx = buildCtx(players, opts);
-  const state = buildState(ctx, players, opts.budget);
   return { ctx, state };
 }
 
-describe('basePriceForRating', () => {
-  it('is a direct, rounded reading of the rating, floored at 1', () => {
-    expect(basePriceForRating(1)).toBe(1);
-    expect(basePriceForRating(8)).toBe(8);
-    expect(basePriceForRating(10)).toBe(10);
-    expect(basePriceForRating(5.6)).toBe(6);
-    expect(basePriceForRating(0)).toBe(1);
-  });
-});
-
-describe('positionCap', () => {
-  it('caps each side at half the squad-wide supply, rounded up', () => {
-    const players: TestPlayer[] = [
-      { id: 'f1', position: 'FWD' }, { id: 'f2', position: 'FWD' },
-      { id: 'f3', position: 'FWD' }, { id: 'f4', position: 'FWD' },
-    ];
-    const ctx = buildCtx(players, { teamSize: 6, style: 'price' });
-    expect(positionCap('FWD', ctx)).toBe(2);
-  });
-
-  it('rounds an odd supply up rather than splitting it unevenly in favour of one side', () => {
-    const players: TestPlayer[] = [
-      { id: 'f1', position: 'FWD' }, { id: 'f2', position: 'FWD' }, { id: 'f3', position: 'FWD' },
-    ];
-    const ctx = buildCtx(players, { teamSize: 6, style: 'price' });
-    // 3 forwards -> cap 2 each, so the worst split is 2-1, never 3-0.
-    expect(positionCap('FWD', ctx)).toBe(2);
+describe('STARTING_BID', () => {
+  it('is a flat 5 for every player', () => {
+    expect(STARTING_BID).toBe(5);
   });
 });
 
 describe('maxBid', () => {
-  it('reserves the combined starting price of the cheapest remaining eligible players, not a flat 1 credit each', () => {
+  it('reserves the flat starting bid for each remaining eligible slot, not a flat 1 credit each', () => {
     const players: TestPlayer[] = [
-      { id: 'p1', position: 'FWD', rating: 3 },
-      { id: 'p2', position: 'FWD', rating: 7 },
-      { id: 'p3', position: 'FWD', rating: 2 },
+      { id: 'p1', position: 'FWD' },
+      { id: 'p2', position: 'FWD' },
+      { id: 'p3', position: 'FWD' },
     ];
     const { ctx, state } = setup(players, { teamSize: 4, budget: 20, style: 'price', roundOrder: ['FWD'] });
     const team = state.teams.A; // owns 1 (the leader), needs 3 more -> 2 remaining after this pick
 
-    // Cheapest 2 of {3,7,2} = 2 + 3 = 5.
-    expect(maxBid(team, ctx, state.poolIds)).toBe(20 - 5);
+    // Cheapest 2 eligible players, each at the flat starting bid: 5 + 5 = 10.
+    expect(maxBid(team, ctx, state.poolIds)).toBe(20 - 10);
 
-    // Excluding p1 (as when p1 is the very player being bid on) changes which players count as "remaining".
-    expect(maxBid(team, ctx, state.poolIds, 'p1')).toBe(20 - (2 + 7));
+    // Excluding p1 (as when p1 is the very player being bid on) still leaves 2 eligible players at the same flat price.
+    expect(maxBid(team, ctx, state.poolIds, 'p1')).toBe(20 - 10);
   });
 
   it('reserves nothing on the final slot — the whole remaining budget is available', () => {
@@ -119,32 +70,32 @@ describe('maxBid', () => {
     const cap = maxBid(state.teams.A, ctx, state.poolIds);
     expect(cap).toBeLessThan(1);
 
-    const result = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 1 }, ctx);
+    const result = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 5 }, ctx);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.code).toBe('EXCEEDS_MAX_BID');
   });
 });
 
-describe('rating-based starting prices', () => {
-  it('rejects a nomination priced below the player’s starting price', () => {
-    const players: TestPlayer[] = [{ id: 'p1', position: 'FWD', rating: 6 }];
+describe('flat starting prices', () => {
+  it('rejects a nomination priced below the flat starting price', () => {
+    const players: TestPlayer[] = [{ id: 'p1', position: 'FWD' }];
     const { ctx, state } = setup(players, { teamSize: 2, budget: 20, style: 'price', roundOrder: ['FWD'] });
-    const under = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 5 }, ctx);
+    const under = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 4 }, ctx);
     expect(under.ok).toBe(false);
     if (!under.ok) expect(under.code).toBe('BELOW_BASE_PRICE');
 
-    const atFloor = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 6 }, ctx);
+    const atFloor = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 5 }, ctx);
     expect(atFloor.ok).toBe(true);
   });
 
-  it('open bidding starts at the player’s rating-based price, not a flat 1 credit', () => {
-    const players: TestPlayer[] = [{ id: 'p1', position: 'FWD', rating: 7 }];
+  it('open bidding starts at the flat starting price for every player', () => {
+    const players: TestPlayer[] = [{ id: 'p1', position: 'FWD' }];
     const { ctx, state } = setup(players, { teamSize: 2, budget: 20, style: 'open', roundOrder: ['FWD'] });
     // Any client-supplied price is ignored/overridden for open style.
     const nominated = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 999 }, ctx);
     expect(nominated.ok).toBe(true);
     if (!nominated.ok) return;
-    expect(nominated.state.nomination?.price).toBe(7);
+    expect(nominated.state.nomination?.price).toBe(5);
     expect(nominated.state.nomination?.highTeam).toBe('A');
   });
 });
@@ -152,11 +103,11 @@ describe('rating-based starting prices', () => {
 describe('name-your-price auctions', () => {
   it('a pass assigns the player to the nominator at the nominator’s own price', () => {
     const players: TestPlayer[] = [
-      { id: 'p1', position: 'FWD', rating: 4 },
-      { id: 'p2', position: 'FWD', rating: 4 },
+      { id: 'p1', position: 'FWD' },
+      { id: 'p2', position: 'FWD' },
     ];
     const { ctx, state } = setup(players, { teamSize: 2, budget: 10, style: 'price', roundOrder: ['FWD'] });
-    const nominated = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 4 }, ctx);
+    const nominated = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 5 }, ctx);
     expect(nominated.ok).toBe(true);
     if (!nominated.ok) return;
 
@@ -164,17 +115,17 @@ describe('name-your-price auctions', () => {
     expect(passed.ok).toBe(true);
     if (!passed.ok) return;
     expect(passed.state.teams.A.playerIds).toContain('p1');
-    expect(passed.state.teams.A.budget).toBe(6);
+    expect(passed.state.teams.A.budget).toBe(5);
     expect(passed.state.teams.B.playerIds).not.toContain('p1');
   });
 
   it('the responder cannot afford the price and only a pass is accepted', () => {
     const players: TestPlayer[] = [
-      { id: 'p1', position: 'FWD', rating: 2 },
-      { id: 'p2', position: 'FWD', rating: 2 },
+      { id: 'p1', position: 'FWD' },
+      { id: 'p2', position: 'FWD' },
     ];
-    const { ctx, state } = setup(players, { teamSize: 2, budget: 2, style: 'price', roundOrder: ['FWD'] });
-    const nominated = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 2 }, ctx);
+    const { ctx, state } = setup(players, { teamSize: 2, budget: 5, style: 'price', roundOrder: ['FWD'] });
+    const nominated = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 5 }, ctx);
     expect(nominated.ok).toBe(true);
     if (!nominated.ok) return;
 
@@ -188,11 +139,11 @@ describe('open bidding', () => {
 
   it('a pass sells to highTeam at the current price', () => {
     const players: TestPlayer[] = [
-      { id: 'p1', position: 'FWD', rating: 1 },
-      { id: 'p2', position: 'FWD', rating: 1 },
+      { id: 'p1', position: 'FWD' },
+      { id: 'p2', position: 'FWD' },
     ];
     const { ctx, state } = setup(players, { teamSize: 2, budget: 10, style, roundOrder: ['FWD'] });
-    const nominated = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 1 }, ctx);
+    const nominated = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 5 }, ctx);
     expect(nominated.ok).toBe(true);
     if (!nominated.ok) return;
 
@@ -200,135 +151,130 @@ describe('open bidding', () => {
     expect(passed.ok).toBe(true);
     if (!passed.ok) return;
     expect(passed.state.teams.A.playerIds).toContain('p1');
-    expect(passed.state.teams.A.budget).toBe(9);
+    expect(passed.state.teams.A.budget).toBe(5);
   });
 
   it('raises alternate highTeam correctly', () => {
     const players: TestPlayer[] = [
-      { id: 'p1', position: 'FWD', rating: 1 },
-      { id: 'p2', position: 'FWD', rating: 1 },
+      { id: 'p1', position: 'FWD' },
+      { id: 'p2', position: 'FWD' },
     ];
-    const { ctx, state } = setup(players, { teamSize: 2, budget: 10, style, roundOrder: ['FWD'] });
-    const nominated = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 1 }, ctx);
+    const { ctx, state } = setup(players, { teamSize: 2, budget: 20, style, roundOrder: ['FWD'] });
+    const nominated = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 5 }, ctx);
     if (!nominated.ok) throw new Error('setup failed');
 
     const raised1 = reduce(nominated.state, { kind: 'bid', team: 'B', action: 'raise', amount: 1 }, ctx);
     expect(raised1.ok).toBe(true);
     if (!raised1.ok) return;
     expect(raised1.state.nomination?.highTeam).toBe('B');
-    expect(raised1.state.nomination?.price).toBe(2);
+    expect(raised1.state.nomination?.price).toBe(6);
 
     const raised2 = reduce(raised1.state, { kind: 'bid', team: 'A', action: 'raise', amount: 5 }, ctx);
     expect(raised2.ok).toBe(true);
     if (!raised2.ok) return;
     expect(raised2.state.nomination?.highTeam).toBe('A');
-    expect(raised2.state.nomination?.price).toBe(7);
+    expect(raised2.state.nomination?.price).toBe(11);
 
     const passed = reduce(raised2.state, { kind: 'bid', team: 'B', action: 'pass' }, ctx);
     expect(passed.ok).toBe(true);
     if (!passed.ok) return;
     expect(passed.state.teams.A.playerIds).toContain('p1');
-    expect(passed.state.teams.A.budget).toBe(3);
+    expect(passed.state.teams.A.budget).toBe(9);
   });
 });
 
-describe('position cap (generalises the old keeper-only rule to every position)', () => {
-  it('rejects a take/raise that would exceed the cap, forcing a pass even though nominating is still open to the other side', () => {
-    // 3 GKs total -> cap = ceil(3/2) = 2 each; the worst possible split is 2-1, never 3-0.
+describe('no categories — any player, any time', () => {
+  it('lets a captain nominate any pool player regardless of position, in any order', () => {
     const players: TestPlayer[] = [
-      { id: 'gk1', position: 'GK', rating: 5 },
-      { id: 'gk2', position: 'GK', rating: 5 },
-      { id: 'gk3', position: 'GK', rating: 5 },
+      { id: 'gk1', position: 'GK' },
+      { id: 'd1', position: 'DEF' },
+      { id: 'f1', position: 'FWD' },
+      { id: 'm1', position: 'MID' },
     ];
-    const { ctx, state } = setup(players, { teamSize: 5, budget: 100, style: 'price', roundOrder: ['GK'] });
-    expect(positionCap('GK', ctx)).toBe(2);
+    const { ctx, state } = setup(players, { teamSize: 3, budget: 30, style: 'price' });
+    expect(state.currentRound).toBeNull();
 
-    // A nominates gk1, B passes -> A buys it (A: 1 GK). Turn passes to B.
+    // Start with a defender, not the "first" position of any round order.
+    const r = reduce(state, { kind: 'nominate', team: 'A', playerId: 'd1', price: 5 }, ctx);
+    expect(r.ok).toBe(true);
+  });
+
+  it('has no position limit — a team may end up with several of the same role', () => {
+    const players: TestPlayer[] = [
+      { id: 'gk1', position: 'GK' },
+      { id: 'gk2', position: 'GK' },
+      { id: 'gk3', position: 'GK' },
+      { id: 'x1', position: 'FWD' },
+    ];
+    const { ctx, state } = setup(players, { teamSize: 4, budget: 100, style: 'price' });
+
+    // A buys gk1 (B passes); turn -> B. B nominates gk2, A takes it; A now holds 2 keepers.
     let r = reduce(state, { kind: 'nominate', team: 'A', playerId: 'gk1', price: 5 }, ctx);
     if (!r.ok) throw new Error('setup');
     r = reduce(r.state, { kind: 'respond', team: 'B', action: 'pass' }, ctx);
     if (!r.ok) throw new Error('setup');
-    expect(r.state.turn).toBe('B');
-
-    // B nominates gk2, but A takes it instead (A: 2 GK = cap). Eligibility then bounces turn to B.
     r = reduce(r.state, { kind: 'nominate', team: 'B', playerId: 'gk2', price: 5 }, ctx);
     if (!r.ok) throw new Error('setup');
     r = reduce(r.state, { kind: 'respond', team: 'A', action: 'take' }, ctx);
     if (!r.ok) throw new Error('setup');
-    expect(r.state.teams.A.playerIds.filter((id) => id.startsWith('gk')).length).toBe(2);
-    expect(r.state.turn).toBe('B');
 
-    // B nominates the last GK.
-    const nominated = reduce(r.state, { kind: 'nominate', team: 'B', playerId: 'gk3', price: 5 }, ctx);
-    expect(nominated.ok).toBe(true);
-    if (!nominated.ok) return;
-
-    // A responding 'take' would give A a 3rd GK, exceeding the cap of 2 — illegal.
-    const blocked = reduce(nominated.state, { kind: 'respond', team: 'A', action: 'take' }, ctx);
-    expect(blocked.ok).toBe(false);
-    if (!blocked.ok) expect(blocked.code).toBe('POSITION_LIMIT');
-
-    // A must pass instead — B ends up with the guaranteed minimum of 1.
-    const passed = reduce(nominated.state, { kind: 'respond', team: 'A', action: 'pass' }, ctx);
-    expect(passed.ok).toBe(true);
-    if (!passed.ok) return;
-    expect(passed.state.teams.B.playerIds).toContain('gk3');
-    expect(passed.state.teams.A.playerIds.filter((id) => id.startsWith('gk')).length).toBe(2);
+    // The turn comes back to A, who nominates gk3 — B passes, so A buys a THIRD keeper.
+    // No POSITION_LIMIT any more; this fills A's squad (leader + 3) and triggers autofill.
+    expect(r.state.turn).toBe('A');
+    const n = reduce(r.state, { kind: 'nominate', team: 'A', playerId: 'gk3', price: 5 }, ctx);
+    expect(n.ok).toBe(true);
+    if (!n.ok) return;
+    const taken = reduce(n.state, { kind: 'respond', team: 'B', action: 'pass' }, ctx);
+    expect(taken.ok).toBe(true);
+    if (!taken.ok) return;
+    expect(taken.state.teams.A.playerIds.filter((id) => id.startsWith('gk')).length).toBe(3);
   });
-});
 
-describe('turn passing and round advancement', () => {
-  it('passes the turn to the other team once the current team is capped out for this round’s position', () => {
+  it('alternates the turn after each sale', () => {
     const players: TestPlayer[] = [
-      { id: 'f1', position: 'FWD', rating: 5 },
-      { id: 'f2', position: 'FWD', rating: 5 },
-      { id: 'f3', position: 'FWD', rating: 5 },
+      { id: 'p1', position: 'FWD' },
+      { id: 'p2', position: 'MID' },
+      { id: 'p3', position: 'DEF' },
+      { id: 'p4', position: 'GK' },
     ];
-    const { ctx, state } = setup(players, { teamSize: 6, budget: 100, style: 'price', roundOrder: ['FWD'] });
-    expect(positionCap('FWD', ctx)).toBe(2);
-
-    // A nominates f1, B passes -> A buys (A: 1 FWD). Turn -> B.
-    let r = reduce(state, { kind: 'nominate', team: 'A', playerId: 'f1', price: 5 }, ctx);
+    const { ctx, state } = setup(players, { teamSize: 4, budget: 100, style: 'price' });
+    let r = reduce(state, { kind: 'nominate', team: 'A', playerId: 'p1', price: 5 }, ctx);
     if (!r.ok) throw new Error('setup');
     r = reduce(r.state, { kind: 'respond', team: 'B', action: 'pass' }, ctx);
     if (!r.ok) throw new Error('setup');
-
-    // B nominates f2, A takes it (A: 2 FWD = cap). Eligibility should now skip A.
-    r = reduce(r.state, { kind: 'nominate', team: 'B', playerId: 'f2', price: 5 }, ctx);
-    if (!r.ok) throw new Error('setup');
-    r = reduce(r.state, { kind: 'respond', team: 'A', action: 'take' }, ctx);
-    if (!r.ok) throw new Error('setup');
-
     expect(r.state.turn).toBe('B');
-    expect(r.state.currentRound).toBe('FWD');
+    expect(r.state.phase).toBe('nominate');
   });
 
-  it('advances the round automatically once it empties', () => {
+  it('hands the turn to the other team when the current one cannot afford any nomination', () => {
     const players: TestPlayer[] = [
-      { id: 'gk1', position: 'GK', rating: 5 },
-      { id: 'fwd1', position: 'FWD', rating: 5 },
+      { id: 'p1', position: 'FWD' },
+      { id: 'p2', position: 'MID' },
+      { id: 'p3', position: 'DEF' },
     ];
-    const { ctx, state } = setup(players, { teamSize: 3, budget: 20, style: 'price', roundOrder: ['GK', 'FWD'] });
-
-    const n1 = reduce(state, { kind: 'nominate', team: 'A', playerId: 'gk1', price: 5 }, ctx);
-    if (!n1.ok) throw new Error('setup');
-    const r1 = reduce(n1.state, { kind: 'respond', team: 'B', action: 'pass' }, ctx);
-    if (!r1.ok) throw new Error('setup');
-
-    expect(r1.state.currentRound).toBe('FWD');
+    // A has 5 credits and needs 2 more players (reserve 5 after this pick) -> max bid 0 -> cannot nominate.
+    const { ctx, state } = setup(players, { teamSize: 4, budget: 100, style: 'price' });
+    const poor: DraftState = {
+      ...state,
+      turn: 'A',
+      teams: { ...state.teams, A: { ...state.teams.A, budget: 5 } },
+    };
+    const turn = reduce(poor, { kind: 'nominate', team: 'A', playerId: 'p1', price: 5 }, ctx);
+    expect(turn.ok).toBe(false);
+    if (!turn.ok) expect(turn.code).toBe('EXCEEDS_MAX_BID');
   });
 });
 
 describe('autofill', () => {
   it('fills the opposition with the entire remaining pool at zero cost once a team reaches team_size', () => {
     const players: TestPlayer[] = [
-      { id: 'f1', position: 'FWD', rating: 1 },
-      { id: 'f2', position: 'FWD', rating: 1 },
-      { id: 'f3', position: 'FWD', rating: 1 },
+      { id: 'f1', position: 'FWD' },
+      { id: 'f2', position: 'FWD' },
+      { id: 'f3', position: 'FWD' },
     ];
     const { ctx, state } = setup(players, { teamSize: 2, budget: 20, style: 'price', roundOrder: ['FWD'] });
 
-    const n1 = reduce(state, { kind: 'nominate', team: 'A', playerId: 'f1', price: 1 }, ctx);
+    const n1 = reduce(state, { kind: 'nominate', team: 'A', playerId: 'f1', price: 5 }, ctx);
     if (!n1.ok) throw new Error('setup');
     // A takes f1 via a pass from B => A now has [leaderA, f1] = team_size 2 reached.
     const r1 = reduce(n1.state, { kind: 'respond', team: 'B', action: 'pass' }, ctx);
@@ -342,10 +288,10 @@ describe('autofill', () => {
   });
 
   it('resolves the final player in the pool without leaving a phase nobody can act on', () => {
-    const players: TestPlayer[] = [{ id: 'f1', position: 'FWD', rating: 1 }];
+    const players: TestPlayer[] = [{ id: 'f1', position: 'FWD' }];
     const { ctx, state } = setup(players, { teamSize: 2, budget: 20, style: 'price', roundOrder: ['FWD'] });
 
-    const n1 = reduce(state, { kind: 'nominate', team: 'A', playerId: 'f1', price: 1 }, ctx);
+    const n1 = reduce(state, { kind: 'nominate', team: 'A', playerId: 'f1', price: 5 }, ctx);
     if (!n1.ok) throw new Error('setup');
     const r1 = reduce(n1.state, { kind: 'respond', team: 'B', action: 'take' }, ctx);
     expect(r1.ok).toBe(true);

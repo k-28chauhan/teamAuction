@@ -59,6 +59,7 @@ export class MockStore {
       scoreA: 4,
       scoreB: 3,
       scorers: [],
+      prices: [],
       createdAt: new Date(Date.now() - 14 * 86400000).toISOString(),
       playedAt: new Date(Date.now() - 14 * 86400000).toISOString(),
     };
@@ -80,6 +81,7 @@ export class MockStore {
       scoreA: 2,
       scoreB: 2,
       scorers: [],
+      prices: [],
       createdAt: new Date(Date.now() - 7 * 86400000).toISOString(),
       playedAt: new Date(Date.now() - 7 * 86400000).toISOString(),
     };

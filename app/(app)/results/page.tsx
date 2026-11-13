@@ -1,21 +1,54 @@
 'use client';
 
 import React, { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { getMatchdays } from '@/lib/api-client';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { getMatchdays, deleteMatchday } from '@/lib/api-client';
+import { useAuth } from '@/components/providers';
 import type { Matchday, Player } from '@/lib/contract/types';
 import { Panel } from '@/components/ui/panel';
+import { Button } from '@/components/ui/button';
+import { Alert } from '@/components/ui/alert';
 import { PositionChip, RatingBadge, PriceChip } from '@/components/ui/chip';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Calendar, ChevronDown, ChevronUp, Trophy, History } from 'lucide-react';
+import { MatchEditor } from '@/components/matchday/match-editor';
+import { Calendar, ChevronDown, ChevronUp, History, Pencil, Trash2 } from 'lucide-react';
+
+/** What a player was won for at auction in this match (undefined for captains and shuffle matches). */
+function priceById(m: Matchday, playerId: string): number | undefined {
+  return m.prices?.find((p) => p.userId === playerId)?.price;
+}
 
 export default function ResultsPage() {
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const isMaster = !!user?.isMaster;
+
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ['matchdays', 'results'],
     queryFn: () => getMatchdays(20),
   });
+
+  const invalidateAfterChange = () => {
+    queryClient.invalidateQueries({ queryKey: ['matchdays'] });
+    queryClient.invalidateQueries({ queryKey: ['leaderboard'] });
+  };
+
+  const deleteMutation = useMutation({
+    mutationFn: (matchdayId: string) => deleteMatchday(matchdayId),
+    onSuccess: invalidateAfterChange,
+    onError: (err: any) => setActionError(err.message || 'Unable to delete matchday.'),
+  });
+
+  // Opening the editor also opens the card, since the editor lives in its drawer.
+  const startEditing = (m: Matchday) => {
+    setEditingId(m.id);
+    setExpandedId(m.id);
+    setActionError(null);
+  };
 
   const matchdays = data?.matchdays?.filter((m) => m.status === 'completed') ?? [];
 
@@ -49,6 +82,8 @@ export default function ResultsPage() {
           {matchdays.length} Matches Logged
         </span>
       </div>
+
+      {actionError && <Alert message={actionError} onDismiss={() => setActionError(null)} />}
 
       {matchdays.length === 0 ? (
         <Panel className="p-12 text-center space-y-3">
@@ -145,10 +180,40 @@ export default function ResultsPage() {
                       {isDraw ? 'Draw' : `Team ${winner} Victory`}
                     </span>
 
-                    <div className="text-slate-400 hover:text-slate-600 flex items-center gap-1 text-xs">
-                      <span className="hidden sm:inline">{isExpanded ? 'Hide' : 'Lineups'}</span>
-                      {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-                    </div>
+                    {(
+                      <div className="flex items-center gap-1">
+                        {isMaster && (
+                          <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              onClick={() => startEditing(m)}
+                              className="w-7 h-7 rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-emerald-600 hover:border-emerald-300 flex items-center justify-center"
+                              aria-label="Edit match"
+                              title="Edit match (score & goals)"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => {
+                                if (confirm(`Delete this matchday (${scoreA}:${scoreB})? This cannot be undone.`)) {
+                                  deleteMutation.mutate(m.id);
+                                }
+                              }}
+                              disabled={deleteMutation.isPending}
+                              className="w-7 h-7 rounded-lg border border-slate-200 bg-white text-slate-500 hover:text-rose-600 hover:border-rose-300 flex items-center justify-center disabled:opacity-50"
+                              aria-label="Delete matchday"
+                              title="Delete matchday"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+
+                        <div className="text-slate-400 hover:text-slate-600 flex items-center gap-1 text-xs">
+                          <span className="hidden sm:inline">{isExpanded ? 'Hide' : 'Lineups'}</span>
+                          {isExpanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -158,6 +223,9 @@ export default function ResultsPage() {
                     className="border-t border-slate-100 bg-slate-50/70 p-5 space-y-4"
                     onClick={(e) => e.stopPropagation()}
                   >
+                    {isMaster && editingId === m.id ? (
+                      <MatchEditor matchday={m} onClose={() => setEditingId(null)} />
+                    ) : (
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                       {/* Team A List */}
                       <div className="space-y-2">
@@ -191,7 +259,10 @@ export default function ResultsPage() {
                                   </span>
                                 )}
                               </div>
-                              <RatingBadge rating={player.rating} />
+                              <div className="flex items-center gap-1.5">
+                                {priceById(m, player.id) !== undefined && <PriceChip price={priceById(m, player.id)!} />}
+                                <RatingBadge rating={player.rating} />
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -229,12 +300,58 @@ export default function ResultsPage() {
                                   </span>
                                 )}
                               </div>
-                              <RatingBadge rating={player.rating} />
+                              <div className="flex items-center gap-1.5">
+                                {priceById(m, player.id) !== undefined && <PriceChip price={priceById(m, player.id)!} />}
+                                <RatingBadge rating={player.rating} />
+                              </div>
                             </div>
                           ))}
                         </div>
                       </div>
                     </div>
+                    )}
+
+                    {!(isMaster && editingId === m.id) && (m.prices?.length ?? 0) > 0 && (
+                      <div className="space-y-2 pt-1">
+                        <div className="flex items-center justify-between pb-1 border-b border-slate-200">
+                          <span className="text-xs font-bold uppercase tracking-wider text-slate-600">
+                            Bidding record
+                          </span>
+                          <span className="text-xs text-slate-400">
+                            {m.prices.reduce((sum, p) => sum + p.price, 0)} cr spent in total
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                          {[...m.prices]
+                            .sort((a, b) => b.price - a.price)
+                            .map((pr) => {
+                              const player = [...m.teams.A, ...m.teams.B].find((p) => p.id === pr.userId);
+                              if (!player) return null;
+                              const team = m.teams.A.some((p) => p.id === pr.userId) ? 'A' : 'B';
+                              return (
+                                <div
+                                  key={pr.userId}
+                                  className="flex items-center justify-between p-2 rounded-lg bg-white border border-slate-200/80 text-xs shadow-sm"
+                                >
+                                  <div className="flex items-center gap-2">
+                                    <span
+                                      className={`text-[10px] font-bold px-1.5 rounded border ${
+                                        team === 'A'
+                                          ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                          : 'bg-blue-50 text-blue-700 border-blue-200'
+                                      }`}
+                                    >
+                                      {team}
+                                    </span>
+                                    <span className="font-semibold text-slate-800">{player.displayName}</span>
+                                  </div>
+                                  <PriceChip price={pr.price} />
+                                </div>
+                              );
+                            })}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
               </Panel>

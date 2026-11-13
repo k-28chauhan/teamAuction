@@ -3,6 +3,7 @@
 import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { getPlayers, createPlayer, createMatchday, startMatchday } from '@/lib/api-client';
+import { STARTING_BID } from '@/lib/draft/engine';
 import type { Player, Position } from '@/lib/contract/types';
 import { Panel } from '@/components/ui/panel';
 import { Button } from '@/components/ui/button';
@@ -21,48 +22,14 @@ import {
   ArrowLeft,
 } from 'lucide-react';
 
-/** Selection happens role by role, in this order, one quota at a time. */
-const ROLE_ORDER: Position[] = ['FWD', 'GK', 'MID', 'DEF'];
-
-const ROLE_LABEL: Record<Position, string> = {
-  FWD: 'Forwards',
-  GK: 'Goalkeepers',
-  MID: 'Midfielders',
-  DEF: 'Defenders',
-};
-
-const ROLE_ICON: Record<Position, string> = {
-  FWD: '⚽',
-  GK: '🧤',
-  MID: '👟',
-  DEF: '🛡️',
-};
-
-/**
- * 2 keepers and one settled shape (1 GK, 1 DEF, 2 MID, N FWD per side) is
- * the standard turf formation — only the forward count flexes with turnout
- * (e.g. 10 players -> 2 FWD total, 12 -> 4 FWD). Below 8 there's no room
- * left for a forward at all, so it floors at 0 rather than going negative.
- */
-function computeQuotas(total: number): Record<Position, number> {
-  const GK = 2;
-  const MID = 4;
-  const DEF = 2;
-  const FWD = Math.max(0, total - GK - MID - DEF);
-  return { GK, MID, DEF, FWD };
-}
-
-const emptyByRole: Record<Position, string[]> = { FWD: [], GK: [], MID: [], DEF: [] };
-
 export function SetupWizard({ onStarted }: { onStarted: () => void }) {
   const queryClient = useQueryClient();
   const [step, setStep] = useState<1 | 2 | 3>(1);
 
-  // Squad size + role-by-role selection (step 1)
+  // How many play + who (step 1) — a flat roster, no roles or tags
   const [totalPlayers, setTotalPlayers] = useState<number>(12);
-  const [rolePhaseIndex, setRolePhaseIndex] = useState(0);
-  const [selectedByRole, setSelectedByRole] = useState<Record<Position, string[]>>(emptyByRole);
-  const [roleSearch, setRoleSearch] = useState('');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [search, setSearch] = useState('');
 
   const [leaderAId, setLeaderAId] = useState<string>('');
   const [leaderBId, setLeaderBId] = useState<string>('');
@@ -71,7 +38,6 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
   const [method, setMethod] = useState<'auction' | 'shuffle'>('auction');
   const [style, setStyle] = useState<'price' | 'open'>('price');
   const [budgetOverride, setBudgetOverride] = useState<number | null>(null);
-  const [roundOrder] = useState<Position[]>(['GK', 'FWD', 'MID', 'DEF']);
 
   // Guest modal state
   const [showGuestModal, setShowGuestModal] = useState(false);
@@ -90,101 +56,51 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
 
   const allPlayers = playersData?.players ?? [];
 
-  const quotas = useMemo(() => computeQuotas(totalPlayers), [totalPlayers]);
-  const currentRole = ROLE_ORDER[rolePhaseIndex]!;
-
-  const selectedIds = useMemo(
-    () => [...selectedByRole.FWD, ...selectedByRole.GK, ...selectedByRole.MID, ...selectedByRole.DEF],
-    [selectedByRole]
-  );
-
-  // Enough for every selected player at their rating-based starting price, plus 50% headroom to actually bid —
+  // Enough for every selected player at the flat starting bid, plus 50% headroom to actually bid —
   // mirrors the backend's default (see app/api/matchdays/route.ts) so the field starts sensible either way.
   const suggestedBudget = useMemo(() => {
     if (selectedIds.length < 2) return 100;
-    const selected = selectedIds.map((id) => allPlayers.find((p) => p.id === id)).filter((p): p is Player => !!p);
-    if (selected.length === 0) return 100;
-    const avgRating = selected.reduce((sum, p) => sum + p.rating, 0) / selected.length;
     const teamSizeGuess = Math.floor(selectedIds.length / 2);
-    return Math.max(1, Math.ceil(teamSizeGuess * avgRating * 1.5));
-  }, [selectedIds, playersData]);
+    return Math.max(1, Math.ceil(teamSizeGuess * STARTING_BID * 1.5));
+  }, [selectedIds]);
 
   // Tracks the squad's suggested budget until the master types their own number.
   const budget = budgetOverride ?? suggestedBudget;
 
   const selectedCount = selectedIds.length;
-  const isOdd = selectedCount % 2 !== 0;
-  const isValidCount = selectedCount >= 4 && !isOdd;
+  const isValidCount = selectedCount >= 4 && selectedCount === totalPlayers && selectedCount % 2 === 0;
   const sideSize = selectedCount / 2;
+  const maxPlayers = Math.max(4, Math.floor(allPlayers.length / 2) * 2);
 
-  // Update how many are playing, trimming any role's selections that no
-  // longer fit the recomputed quota rather than leaving stale over-picks.
+  // Change how many are playing, trimming the selection if it no longer fits.
   const handleSetTotal = (n: number) => {
-    const next = Math.max(8, n);
+    const next = Math.min(maxPlayers, Math.max(4, Math.round(n / 2) * 2));
     setTotalPlayers(next);
-    const newQuotas = computeQuotas(next);
-    setSelectedByRole((prev) => ({
-      FWD: prev.FWD.slice(0, newQuotas.FWD),
-      GK: prev.GK.slice(0, newQuotas.GK),
-      MID: prev.MID.slice(0, newQuotas.MID),
-      DEF: prev.DEF.slice(0, newQuotas.DEF),
-    }));
+    setSelectedIds((prev) => prev.slice(0, next));
   };
 
-  // Anyone can play any role tonight — the whole roster is browsable in
-  // every phase, and how many are still up for grabs only depends on how
-  // many have already been claimed by OTHER roles (this role's own picks
-  // just came out of that same shared pool).
-  const selectedElsewhere = (role: Position) =>
-    ROLE_ORDER.filter((r) => r !== role).reduce((sum, r) => sum + selectedByRole[r].length, 0);
-  const effectiveQuota = (role: Position) => Math.max(0, Math.min(quotas[role], allPlayers.length - selectedElsewhere(role)));
-
-  const toggleInRole = (role: Position, playerId: string) => {
-    setSelectedByRole((prev) => {
-      const current = prev[role];
-      if (current.includes(playerId)) {
-        return { ...prev, [role]: current.filter((id) => id !== playerId) };
-      }
-      if (current.length >= effectiveQuota(role)) return prev;
-      return { ...prev, [role]: [...current, playerId] };
+  const togglePlayer = (playerId: string) => {
+    setSelectedIds((prev) => {
+      if (prev.includes(playerId)) return prev.filter((id) => id !== playerId);
+      if (prev.length >= totalPlayers) return prev;
+      return [...prev, playerId];
     });
   };
 
-  const candidatesForCurrentRole = allPlayers
-    .filter((p) => !selectedIds.includes(p.id))
-    .filter(
-      (p) =>
-        p.displayName.toLowerCase().includes(roleSearch.toLowerCase()) ||
-        p.username.toLowerCase().includes(roleSearch.toLowerCase())
-    );
+  const candidates = allPlayers.filter(
+    (p) =>
+      p.displayName.toLowerCase().includes(search.toLowerCase()) ||
+      p.username.toLowerCase().includes(search.toLowerCase())
+  );
 
-  const assignedRoleOf = (playerId: string): Position | undefined =>
-    ROLE_ORDER.find((role) => selectedByRole[role].includes(playerId));
-
-  const goToPhase = (index: number) => {
-    setRoleSearch('');
-    setRolePhaseIndex(index);
-  };
-
-  const handlePhaseBack = () => {
-    if (rolePhaseIndex > 0) goToPhase(rolePhaseIndex - 1);
-  };
-
-  const handlePhaseContinue = () => {
-    if (rolePhaseIndex < ROLE_ORDER.length - 1) {
-      goToPhase(rolePhaseIndex + 1);
-      return;
-    }
-    // Finished the last role (Defenders) — hand off to captain selection.
+  const handleContinueToCaptains = () => {
     if (!isValidCount) {
-      setFormError(
-        "The squad you've picked isn't an even number — that usually means one role came up short of the roster available. Adjust who's playing and try again."
-      );
+      setFormError(`Pick exactly ${totalPlayers} players to continue.`);
       return;
     }
     setFormError(null);
-    setLeaderAId(selectedIds[0] || '');
-    setLeaderBId(selectedIds[1] || '');
+    if (!selectedIds.includes(leaderAId)) setLeaderAId('');
+    if (!selectedIds.includes(leaderBId)) setLeaderBId('');
     setStep(2);
   };
 
@@ -193,11 +109,9 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
     mutationFn: createPlayer,
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['players'] });
-      setSelectedByRole((prev) => {
-        const role = res.player.position;
-        if (prev[role].includes(res.player.id) || prev[role].length >= effectiveQuota(role)) return prev;
-        return { ...prev, [role]: [...prev[role], res.player.id] };
-      });
+      setSelectedIds((prev) =>
+        prev.includes(res.player.id) || prev.length >= totalPlayers ? prev : [...prev, res.player.id]
+      );
       setShowGuestModal(false);
       setGuestName('');
       setGuestRating(5);
@@ -227,11 +141,6 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
     setFormError(null);
     setIsStarting(true);
     try {
-      const positions: Record<string, Position> = {};
-      for (const role of ROLE_ORDER) {
-        for (const id of selectedByRole[role]) positions[id] = role;
-      }
-
       const res = await createMatchday({
         playerIds: selectedIds,
         leaderAId,
@@ -239,8 +148,6 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
         method,
         style: method === 'auction' ? style : undefined,
         budget: method === 'auction' ? budget : undefined,
-        roundOrder: method === 'auction' ? roundOrder : undefined,
-        positions,
       });
 
       await startMatchday(res.matchday.id);
@@ -321,24 +228,21 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
 
       {formError && <Alert message={formError} onDismiss={() => setFormError(null)} />}
 
-      {/* STEP 1: SQUAD SELECTION, ROLE BY ROLE */}
+      {/* STEP 1: HOW MANY PLAY + WHO */}
       {step === 1 && (
         <div className="space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h2 className="text-xl font-bold text-slate-900">Who's at the turf today?</h2>
               <p className="text-xs text-slate-500">
-                We'll go role by role — forwards, then keepers, midfielders, and defenders.
+                Choose how many are playing, then tick exactly that many from the roster.
               </p>
             </div>
 
             <Button
               variant="secondary"
               size="sm"
-              onClick={() => {
-                setGuestPosition(currentRole);
-                setShowGuestModal(true);
-              }}
+              onClick={() => setShowGuestModal(true)}
               className="self-start sm:self-auto"
             >
               <UserPlus className="w-4 h-4 text-emerald-600" />
@@ -431,7 +335,7 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {[10, 12, 14].map((n) => (
+              {[8, 10, 12, 14].filter((n) => n <= maxPlayers).map((n) => (
                 <button
                   key={n}
                   type="button"
@@ -447,69 +351,41 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
               ))}
               <input
                 type="number"
-                min={8}
+                min={4}
+                max={maxPlayers}
                 step={2}
                 value={totalPlayers}
-                onChange={(e) => handleSetTotal(Math.round(Number(e.target.value) / 2) * 2)}
+                onChange={(e) => handleSetTotal(Number(e.target.value))}
                 className="w-20 rounded-lg bg-white border border-slate-300 px-2.5 py-1.5 text-xs text-slate-900 shadow-sm focus:outline-none focus:border-emerald-500"
               />
             </div>
-            <p className="text-[11px] text-slate-400">
-              {ROLE_ORDER.map((r) => `${quotas[r]} ${ROLE_LABEL[r].toLowerCase()}`).join(' · ')}
-            </p>
           </Panel>
 
-          {/* Role phase progress */}
-          <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-            {ROLE_ORDER.map((role, i) => {
-              const done = i < rolePhaseIndex;
-              const active = i === rolePhaseIndex;
-              return (
-                <button
-                  key={role}
-                  type="button"
-                  onClick={() => goToPhase(i)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold shrink-0 border transition-all ${
-                    active
-                      ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
-                      : done
-                      ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                      : 'bg-white text-slate-400 border-slate-200'
-                  }`}
-                >
-                  {done && <Check className="w-3 h-3" />}
-                  <span>{ROLE_ICON[role]} {role}</span>
-                  <span className={active ? 'text-white/80' : 'text-current opacity-70'}>
-                    {selectedByRole[role].length}/{effectiveQuota(role)}
-                  </span>
-                </button>
-              );
-            })}
+          {/* Selection progress */}
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg font-bold text-slate-900">Pick the squad</h3>
+            <span
+              className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
+                selectedCount === totalPlayers
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  : 'bg-slate-100 text-slate-600 border-slate-200'
+              }`}
+            >
+              {selectedCount} / {totalPlayers} selected
+            </span>
           </div>
 
-          {/* Current phase heading */}
-          <div>
-            <h3 className="text-lg font-bold text-slate-900">
-              {ROLE_ICON[currentRole]} Pick your {ROLE_LABEL[currentRole].toLowerCase()}
-            </h3>
-            <p className="text-xs text-slate-500">
-              {effectiveQuota(currentRole) < quotas[currentRole]
-                ? `Only ${effectiveQuota(currentRole)} players left unclaimed — select all of them to continue.`
-                : `Select ${quotas[currentRole]} from the whole squad — anyone can play this role tonight.`}
-            </p>
-          </div>
-
-          {/* Selected chips for this role */}
-          {selectedByRole[currentRole].length > 0 && (
+          {/* Selected chips */}
+          {selectedIds.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
-              {selectedByRole[currentRole].map((id) => {
+              {selectedIds.map((id) => {
                 const p = allPlayers.find((x) => x.id === id);
                 if (!p) return null;
                 return (
                   <button
                     key={id}
                     type="button"
-                    onClick={() => toggleInRole(currentRole, id)}
+                    onClick={() => togglePlayer(id)}
                     className="inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold hover:bg-emerald-100"
                   >
                     <span>{p.displayName}</span>
@@ -520,51 +396,61 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
             </div>
           )}
 
-          {/* Search within this role */}
+          {/* Search */}
           <div className="relative">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
             <input
               type="text"
-              placeholder={`Search ${ROLE_LABEL[currentRole].toLowerCase()}...`}
-              value={roleSearch}
-              onChange={(e) => setRoleSearch(e.target.value)}
+              placeholder="Search players..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
               className="w-full rounded-xl bg-white border border-slate-200 pl-9 pr-4 py-2 text-sm text-slate-800 placeholder:text-slate-400 shadow-sm focus:outline-none focus:border-emerald-500"
             />
           </div>
 
-          {/* Candidate list — shrinks as the master selects */}
+          {/* Whole roster */}
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 max-h-[42vh] overflow-y-auto pr-1">
-            {candidatesForCurrentRole.length === 0 ? (
+            {candidates.length === 0 ? (
               <div className="col-span-full text-center text-xs text-slate-400 py-8">
                 {allPlayers.length === 0
                   ? 'No players on the roster yet — add one as a guest above.'
-                  : roleSearch
-                  ? 'No one matches that search.'
-                  : 'Everyone available has been picked.'}
+                  : 'No one matches that search.'}
               </div>
             ) : (
-              candidatesForCurrentRole.map((player) => {
-                const quotaReached = selectedByRole[currentRole].length >= effectiveQuota(currentRole);
+              candidates.map((player) => {
+                const isSelected = selectedIds.includes(player.id);
+                const full = !isSelected && selectedCount >= totalPlayers;
                 return (
                   <div
                     key={player.id}
-                    onClick={() => !quotaReached && toggleInRole(currentRole, player.id)}
+                    onClick={() => !full && togglePlayer(player.id)}
                     className={`flex items-center justify-between p-3 rounded-xl border select-none transition-all ${
-                      quotaReached
+                      isSelected
+                        ? 'bg-emerald-50 border-emerald-400 cursor-pointer'
+                        : full
                         ? 'bg-slate-50 border-slate-100 opacity-50 cursor-not-allowed'
                         : 'bg-white border-slate-200/80 hover:border-emerald-300 cursor-pointer'
                     }`}
                   >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-semibold text-sm text-slate-900 truncate">
-                          {player.displayName}
-                        </span>
-                        {player.isGuest && (
-                          <span className="text-[10px] text-slate-400 font-medium">guest</span>
-                        )}
+                    <div className="min-w-0 flex items-center gap-2">
+                      <span
+                        className={`w-5 h-5 shrink-0 rounded-md border flex items-center justify-center ${
+                          isSelected ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-slate-300 bg-white'
+                        }`}
+                      >
+                        {isSelected && <Check className="w-3 h-3" />}
+                      </span>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-semibold text-sm text-slate-900 truncate">
+                            {player.displayName}
+                          </span>
+                          {player.isGuest && (
+                            <span className="text-[10px] text-slate-400 font-medium">guest</span>
+                          )}
+                        </div>
+                        <span className="text-xs text-slate-400 block truncate">@{player.username}</span>
                       </div>
-                      <span className="text-xs text-slate-400 block truncate">@{player.username}</span>
                     </div>
                     <RatingBadge rating={player.rating} />
                   </div>
@@ -573,22 +459,9 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
             )}
           </div>
 
-          {/* Phase nav */}
-          <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-md flex items-center justify-between gap-3">
-            <Button variant="secondary" onClick={handlePhaseBack} disabled={rolePhaseIndex === 0}>
-              <ArrowLeft className="w-4 h-4" />
-              <span>Back</span>
-            </Button>
-            <Button
-              variant="primary"
-              disabled={selectedByRole[currentRole].length !== effectiveQuota(currentRole)}
-              onClick={handlePhaseContinue}
-            >
-              <span>
-                {rolePhaseIndex < ROLE_ORDER.length - 1
-                  ? `Continue to ${ROLE_LABEL[ROLE_ORDER[rolePhaseIndex + 1]!]}`
-                  : 'Continue to Captains'}
-              </span>
+          <div className="bg-white border border-slate-200/90 rounded-2xl p-4 shadow-md flex items-center justify-end">
+            <Button variant="primary" disabled={!isValidCount} onClick={handleContinueToCaptains}>
+              <span>Continue to Captains</span>
               <ArrowRight className="w-4 h-4" />
             </Button>
           </div>
@@ -635,7 +508,7 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
                   .filter(Boolean)
                   .map((p) => (
                     <option key={p.id} value={p.id} disabled={p.id === leaderBId}>
-                      {p.displayName} ({assignedRoleOf(p.id) ?? p.position} · Rating {p.rating})
+                      {p.displayName} (Rating {p.rating})
                     </option>
                   ))}
               </select>
@@ -670,7 +543,7 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
                   .filter(Boolean)
                   .map((p) => (
                     <option key={p.id} value={p.id} disabled={p.id === leaderAId}>
-                      {p.displayName} ({assignedRoleOf(p.id) ?? p.position} · Rating {p.rating})
+                      {p.displayName} (Rating {p.rating})
                     </option>
                   ))}
               </select>
@@ -795,7 +668,7 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
                     >
                       <span className="block text-sm">Open Bidding</span>
                       <span className="block text-[11px] text-slate-400 mt-0.5">
-                        Opens at 1 credit; raises by +1 or +5.
+                        Opens at 5 credits; raises by +1 or +5.
                       </span>
                     </button>
                   </div>
@@ -816,15 +689,15 @@ export function SetupWizard({ onStarted }: { onStarted: () => void }) {
                     <p className="text-[11px] text-slate-400 mt-1">
                       {budgetOverride !== null
                         ? `Suggested for this squad: ${suggestedBudget}cr`
-                        : `Based on this squad's ratings, with room to actually bid.`}
+                        : `Based on the flat starting bid, with room to actually bid.`}
                     </p>
                   </div>
                   <div>
                     <label className="block text-xs font-semibold text-slate-700 mb-1">
-                      Auction Round Order
+                      How it works
                     </label>
                     <div className="p-2.5 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-slate-700">
-                      🧤 Goalkeepers → ⚽ Forwards → 👟 Midfield → 🛡️ Defenders
+                      Captains take turns picking any player — every player starts at {STARTING_BID}cr.
                     </div>
                   </div>
                 </div>

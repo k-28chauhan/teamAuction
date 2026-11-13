@@ -11,8 +11,9 @@ const schema = z.object({
   scoreA: z.number().int().min(0),
   scoreB: z.number().int().min(0),
   // Optional: who scored. Omit entirely to leave any previously-recorded
-  // scorers untouched (e.g. when just correcting the score); pass an array
-  // (empty included) to replace them outright.
+  // scorers untouched (e.g. when just correcting the score); pass an array to
+  // replace them outright. An EMPTY array clears every scorer and is allowed
+  // with any score — a non-empty one must add up to each team's score.
   scorers: z
     .array(
       z.object({
@@ -41,7 +42,7 @@ export const POST = withErrorBoundary(async (req: NextRequest, ctx: { params: Pr
   const { scoreA, scoreB, scorers } = await parseJson(req, schema);
   const playersByUser = await getMatchdayPlayers(id);
 
-  if (scorers) {
+  if (scorers && scorers.length > 0) {
     const seen = new Set<string>();
     let sumA = 0;
     let sumB = 0;

@@ -4,17 +4,13 @@ import type {
   DraftLogEntry,
   DraftState,
   DraftTeamState,
-  Position,
   Team,
 } from '@/lib/contract/types';
 
 /** Immutable facts the engine needs. It never reads or writes anything itself. */
 export type DraftContext = {
   teamSize: number;
-  roundOrder: Position[];
   style: 'price' | 'open';
-  positionOf: Record<string, Position>;
-  ratingOf: Record<string, number>;
 };
 
 export type DraftAction =
@@ -40,43 +36,15 @@ function other(team: Team): Team {
   return team === 'A' ? 'B' : 'A';
 }
 
-/** A player's opening/reserve price, set from their rating rather than left to guesswork. */
-export function basePriceForRating(rating: number): number {
-  return Math.max(1, Math.round(rating));
-}
+/** Every player's opening/reserve bid — flat, regardless of rating. */
+export const STARTING_BID = 5;
 
 /**
- * No side may hold more than half (rounded up) of the whole squad's supply of
- * any one position — the generalised form of "only one team can hoard the
- * keepers." An odd supply (e.g. 5 forwards) still splits fairly: cap 3 and 2,
- * never 4 and 1, because both sides share the same ceil(n/2) cap and can
- * never simultaneously reach it while player n remains unclaimed.
- */
-export function positionCap(position: Position, ctx: DraftContext): number {
-  const total = Object.values(ctx.positionOf).filter((p) => p === position).length;
-  return Math.ceil(total / 2);
-}
-
-function countOfPosition(team: DraftTeamState, position: Position, positionOf: Record<string, Position>): number {
-  return team.playerIds.filter((id) => positionOf[id] === position).length;
-}
-
-function wouldExceedPositionCap(position: Position, team: DraftTeamState, ctx: DraftContext): boolean {
-  return countOfPosition(team, position, ctx.positionOf) >= positionCap(position, ctx);
-}
-
-function positionCapMessage(position: Position, ctx: DraftContext): string {
-  const cap = positionCap(position, ctx);
-  return `Your team can only have ${cap} ${position} player${cap === 1 ? '' : 's'} — that's already filled.`;
-}
-
-/**
- * A leader may never bid so much that they can't complete their squad. The
- * reserve isn't a flat 1 credit per empty slot — it's the combined starting
- * price (see basePriceForRating) of the cheapest players still legally
- * available to this team, one per remaining slot. As the cheap end of the
- * pool sells, the cap tightens on its own; nothing needs to recompute it
- * outside of this call because it is re-derived fresh on every action.
+ * A leader may never bid so much that they can't complete their squad: the
+ * reserve is one starting bid (STARTING_BID) for every slot still empty after
+ * this pick, capped by how many pool players actually remain. Any pool player
+ * can go to either team, so there are no per-position limits — only credits.
+ * It is re-derived fresh on every action, so nothing needs to recompute it.
  */
 export function maxBid(
   team: DraftTeamState,
@@ -87,18 +55,13 @@ export function maxBid(
   const remainingSlotsAfterThisPick = ctx.teamSize - team.playerIds.length - 1;
   if (remainingSlotsAfterThisPick <= 0) return team.budget;
 
-  const eligiblePrices = poolIds
-    .filter((id) => id !== excludePlayerId)
-    .filter((id) => !wouldExceedPositionCap(ctx.positionOf[id], team, ctx))
-    .map((id) => basePriceForRating(ctx.ratingOf[id] ?? 1))
-    .sort((a, b) => a - b);
-
-  const reserved = eligiblePrices.slice(0, remainingSlotsAfterThisPick);
-  // A shortfall (fewer legally-eligible pool players than remaining slots)
-  // should never happen — autofill closes the draft before it could — but
-  // reserve a floor of 1 credit per unaccounted slot rather than assume 0.
-  const shortfall = remainingSlotsAfterThisPick - reserved.length;
-  const reserve = reserved.reduce((sum, price) => sum + price, 0) + shortfall * 1;
+  const available = poolIds.filter((id) => id !== excludePlayerId).length;
+  const reservedSlots = Math.min(remainingSlotsAfterThisPick, available);
+  // A shortfall (fewer pool players than remaining slots) should never happen
+  // — autofill closes the draft before it could — but reserve a floor of one
+  // starting bid per unaccounted slot rather than assume 0.
+  const shortfall = remainingSlotsAfterThisPick - reservedSlots;
+  const reserve = (reservedSlots + shortfall) * STARTING_BID;
 
   return team.budget - reserve;
 }
@@ -107,55 +70,18 @@ function pushLog(state: DraftState, text: string): DraftLogEntry[] {
   return [{ text, at: new Date().toISOString() }, ...state.log].slice(0, 50);
 }
 
-/** Is `team` able to nominate at least one player from the pool at the current round? */
-function teamHasEligibleNomination(state: DraftState, ctx: DraftContext, team: Team): boolean {
-  if (!state.currentRound) return false;
+/** Can `team` afford to put at least one pool player up for bid at the starting price? */
+function teamCanNominate(state: DraftState, ctx: DraftContext, team: Team): boolean {
   const acquirer = state.teams[team];
-  if (wouldExceedPositionCap(state.currentRound, acquirer, ctx)) return false;
-
-  return state.poolIds.some((id) => {
-    if (ctx.positionOf[id] !== state.currentRound) return false;
-    const base = basePriceForRating(ctx.ratingOf[id] ?? 1);
-    return base <= maxBid(acquirer, ctx, state.poolIds, id);
-  });
+  if (acquirer.playerIds.length >= ctx.teamSize) return false;
+  return state.poolIds.some((id) => STARTING_BID <= maxBid(acquirer, ctx, state.poolIds, id));
 }
 
-function firstRoundWithPoolPlayers(state: DraftState, ctx: DraftContext): Position | null {
-  for (const position of ctx.roundOrder) {
-    if (state.poolIds.some((id) => ctx.positionOf[id] === position)) return position;
-  }
-  return null;
-}
-
-/**
- * Advance currentRound past empty rounds, then land `turn` on a team that
- * actually has an eligible nomination, alternating first. If neither team is
- * eligible for the current round, the round is exhausted and we advance again.
- */
-function settleRoundAndTurn(state: DraftState, ctx: DraftContext): DraftState {
-  let next = state;
-
-  for (;;) {
-    const round = firstRoundWithPoolPlayers(next, ctx);
-    if (round === null) {
-      return { ...next, currentRound: null };
-    }
-    next = { ...next, currentRound: round };
-
-    if (teamHasEligibleNomination(next, ctx, next.turn)) {
-      return next;
-    }
-    if (teamHasEligibleNomination(next, ctx, other(next.turn))) {
-      return { ...next, turn: other(next.turn) };
-    }
-
-    // Neither team can act on this round's remaining players right now (cap
-    // reached on both sides, or neither can afford the cheapest one left).
-    // Mathematically at most one side can be capped out while supply of a
-    // position remains, so this is unreachable in practice — bail out rather
-    // than loop forever if it ever is.
-    return next;
-  }
+/** Keep `turn` on a team that can actually nominate, alternating first. */
+function settleTurn(state: DraftState, ctx: DraftContext): DraftState {
+  if (teamCanNominate(state, ctx, state.turn)) return state;
+  if (teamCanNominate(state, ctx, other(state.turn))) return { ...state, turn: other(state.turn) };
+  return state;
 }
 
 function assignPlayer(
@@ -229,7 +155,7 @@ function afterAssignment(
   }
 
   const resolved: DraftState = { ...state, nomination: null, turn: other(nominatedBy), phase: 'nominate' };
-  const settled = settleRoundAndTurn(resolved, ctx);
+  const settled = settleTurn(resolved, ctx);
   return { ok: true, state: settled, events };
 }
 
@@ -260,20 +186,12 @@ function nominate(
   if (!state.poolIds.includes(action.playerId)) {
     return fail('INELIGIBLE_PLAYER', 'That player is not available to nominate.');
   }
-  const position = ctx.positionOf[action.playerId];
-  if (position !== state.currentRound) {
-    return fail('INELIGIBLE_PLAYER', `This round is for ${state.currentRound} players only.`);
-  }
 
   const acquirer = state.teams[action.team];
-  if (wouldExceedPositionCap(position, acquirer, ctx)) {
-    return fail('POSITION_LIMIT', positionCapMessage(position, ctx));
-  }
-
-  const basePrice = basePriceForRating(ctx.ratingOf[action.playerId] ?? 1);
+  const basePrice = STARTING_BID;
   const price = ctx.style === 'open' ? basePrice : Math.trunc(action.price);
   if (!Number.isFinite(price) || price < basePrice) {
-    return fail('BELOW_BASE_PRICE', `The starting price for this player is ${basePrice} credit(s), based on their rating.`);
+    return fail('BELOW_BASE_PRICE', `The starting price for every player is ${basePrice} credit(s).`);
   }
   const cap = maxBid(acquirer, ctx, state.poolIds, action.playerId);
   if (price > cap) {
@@ -324,10 +242,6 @@ function respond(
 
   // action.action === 'take'
   const acquirer = state.teams[responder];
-  const position = ctx.positionOf[nomination.playerId];
-  if (wouldExceedPositionCap(position, acquirer, ctx)) {
-    return fail('POSITION_LIMIT', positionCapMessage(position, ctx));
-  }
   const cap = maxBid(acquirer, ctx, state.poolIds, nomination.playerId);
   if (nomination.price > cap) {
     return fail('EXCEEDS_MAX_BID', `You need to keep enough credits to fill your remaining slots — the most you can offer here is ${cap}.`);
@@ -374,10 +288,6 @@ function bid(
     return fail('EXCEEDS_MAX_BID', 'Raise by 1 or 5 credits.');
   }
   const acquirer = state.teams[responder];
-  const position = ctx.positionOf[nomination.playerId];
-  if (wouldExceedPositionCap(position, acquirer, ctx)) {
-    return fail('POSITION_LIMIT', positionCapMessage(position, ctx));
-  }
 
   const newPrice = nomination.price + action.amount;
   const cap = maxBid(acquirer, ctx, state.poolIds, nomination.playerId);
@@ -421,21 +331,12 @@ export function createInitialAuctionState(args: {
   poolIds: string[];
   budget: number;
   teamSize: number;
-  roundOrder: Position[];
-  positionOf: Record<string, Position>;
-  ratingOf: Record<string, number>;
 }): DraftState {
-  const ctx: DraftContext = {
-    teamSize: args.teamSize,
-    roundOrder: args.roundOrder,
-    style: 'price',
-    positionOf: args.positionOf,
-    ratingOf: args.ratingOf,
-  };
+  const ctx: DraftContext = { teamSize: args.teamSize, style: 'price' };
   const base: DraftState = {
     phase: 'nominate',
     turn: 'A',
-    currentRound: args.roundOrder[0] ?? null,
+    currentRound: null,
     poolIds: args.poolIds,
     teams: {
       A: { leaderId: args.leaderAId, budget: args.budget, playerIds: [args.leaderAId] },
@@ -444,5 +345,5 @@ export function createInitialAuctionState(args: {
     nomination: null,
     log: [{ text: 'Draft started.', at: new Date().toISOString() }],
   };
-  return settleRoundAndTurn(base, ctx);
+  return settleTurn(base, ctx);
 }

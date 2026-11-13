@@ -11,11 +11,11 @@ import {
   cancelMatchday,
 } from '@/lib/api-client';
 import { useAuth } from '@/components/providers';
-import type { Matchday, Player, Team, Position } from '@/lib/contract/types';
-import { basePriceForRating, maxBid as engineMaxBid, positionCap, type DraftContext } from '@/lib/draft/engine';
+import type { Matchday, Player, Team } from '@/lib/contract/types';
+import { STARTING_BID, maxBid as engineMaxBid, type DraftContext } from '@/lib/draft/engine';
 import { Panel } from '@/components/ui/panel';
 import { Button } from '@/components/ui/button';
-import { PositionChip, RatingBadge, TeamBadge } from '@/components/ui/chip';
+import { PositionChip, RatingBadge, PriceChip } from '@/components/ui/chip';
 import { Alert } from '@/components/ui/alert';
 import {
   Gavel,
@@ -27,21 +27,6 @@ import {
   ArrowUpRight,
   Shield,
 } from 'lucide-react';
-
-function roundLabel(round: Position | null | undefined): string {
-  switch (round) {
-    case 'GK':
-      return '🧤 Goalkeeper';
-    case 'DEF':
-      return '🛡️ Defender';
-    case 'MID':
-      return '👟 Midfield';
-    case 'FWD':
-      return '⚽ Forward';
-    default:
-      return '';
-  }
-}
 
 interface LiveAuctionProps {
   matchday: Matchday;
@@ -89,28 +74,16 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
     queryFn: () => getPlayers(true),
   });
   const roster = stateQuery.data?.roster ?? playersData?.players ?? [];
+  const prices = stateQuery.data?.prices ?? {};
   const playersById = new Map<string, Player>();
   roster.forEach((p) => playersById.set(p.id, p));
 
   // The exact same pure logic the server enforces — imported, not re-derived,
   // so the "max bid" shown here can never drift from what the API accepts.
-  const ctx: DraftContext | null = useMemo(() => {
-    if (!roster.length) return null;
-    const positionOf: Record<string, Position> = {};
-    const ratingOf: Record<string, number> = {};
-    for (const p of roster) {
-      positionOf[p.id] = p.position;
-      ratingOf[p.id] = p.rating;
-    }
-    return {
-      teamSize: matchday.teamSize,
-      roundOrder: matchday.roundOrder,
-      style: (matchday.style ?? 'price') as 'price' | 'open',
-      positionOf,
-      ratingOf,
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stateQuery.data?.roster, playersData, matchday.teamSize, matchday.roundOrder, matchday.style]);
+  const ctx: DraftContext = useMemo(
+    () => ({ teamSize: matchday.teamSize, style: (matchday.style ?? 'price') as 'price' | 'open' }),
+    [matchday.teamSize, matchday.style]
+  );
 
   const state = stateQuery.data?.state ?? (matchday as any).state;
   const version = stateQuery.data?.version ?? 1;
@@ -135,15 +108,14 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
   });
 
   const calculateMaxBid = (team: Team, excludePlayerId?: string) => {
-    if (!state || !ctx) return 0;
+    if (!state) return 0;
     return engineMaxBid(state.teams[team], ctx, state.poolIds, excludePlayerId);
   };
 
   // Actions
   const [isNominating, setIsNominating] = useState(false);
   const handleNominate = async (playerId: string) => {
-    const defaultPrice = basePriceForRating(playersById.get(playerId)?.rating ?? 1);
-    const price = nominatePrices[playerId] || defaultPrice;
+    const price = nominatePrices[playerId] || STARTING_BID;
     setActionError(null);
     setStaleNote(null);
     setIsNominating(true);
@@ -217,9 +189,6 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
   }
 
   const poolPlayers = state.poolIds.map((id: string) => playersById.get(id)!).filter(Boolean);
-  const roundPlayers = poolPlayers.filter(
-    (p: Player) => !state.currentRound || p.position === state.currentRound
-  );
   const initialBudget = matchday.budget || matchday.teamSize * 3;
 
   return (
@@ -247,7 +216,7 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
               </span>
             </div>
             <h2 className="text-lg font-bold text-slate-900 mt-0.5">
-              {state.currentRound ? `${roundLabel(state.currentRound)} Round` : 'All Rounds Completed'}
+              {state.phase === 'complete' ? 'Draft complete' : 'Pick any player'}
             </h2>
           </div>
         </div>
@@ -338,7 +307,14 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
                       <PositionChip position={p.position} />
                       <span className="font-semibold text-slate-800">{p.displayName}</span>
                     </div>
-                    <RatingBadge rating={p.rating} />
+                    <div className="flex items-center gap-1.5">
+                      {p.id === teamState.leaderId ? (
+                        <span className="text-[10px] font-bold text-slate-500">Captain</span>
+                      ) : prices[p.id] !== undefined ? (
+                        <PriceChip price={prices[p.id]!} />
+                      ) : null}
+                      <RatingBadge rating={p.rating} />
+                    </div>
                   </div>
                 ))}
 
@@ -378,13 +354,13 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
 
             {permissions.canAct ? (
               <div className="space-y-2.5 max-h-[42vh] overflow-y-auto pr-1">
-                {roundPlayers.length === 0 ? (
+                {poolPlayers.length === 0 ? (
                   <p className="text-sm text-slate-500 text-center py-8">
-                    No available players remaining in this round position.
+                    No players left in the pool.
                   </p>
                 ) : (
-                  roundPlayers.map((player: Player) => {
-                    const startingPrice = basePriceForRating(player.rating);
+                  poolPlayers.map((player: Player) => {
+                    const startingPrice = STARTING_BID;
                     const price = nominatePrices[player.id] ?? startingPrice;
                     const maxAllowed = calculateMaxBid(state.turn, player.id);
                     const isOpenStyle = matchday.style === 'open';
@@ -470,11 +446,7 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
               const respondingTeam: Team = nom.nominatedBy === 'A' ? 'B' : 'A';
               const responderMax = calculateMaxBid(respondingTeam, nom.playerId);
               const cannotAfford = nom.price > responderMax;
-              const positionFull =
-                !!player && !!ctx &&
-                state.teams[respondingTeam].playerIds.filter((id: string) => ctx.positionOf[id] === player.position)
-                  .length >= positionCap(player.position, ctx);
-              const cannotTake = cannotAfford || positionFull;
+              const cannotTake = cannotAfford;
 
               return (
                 <div className="space-y-5">
@@ -503,11 +475,6 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
                       {cannotAfford && (
                         <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 text-center">
                           Team {respondingTeam} cannot afford {nom.price}cr (max bid {responderMax}cr) and must pass.
-                        </div>
-                      )}
-                      {!cannotAfford && positionFull && player && ctx && (
-                        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 text-center">
-                          Team {respondingTeam} already has {positionCap(player.position, ctx)} {player.position} players — the most a side can hold — and must pass.
                         </div>
                       )}
 
@@ -555,10 +522,6 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
               const player = playersById.get(nom.playerId);
               const otherTeam: Team = nom.highTeam === 'A' ? 'B' : 'A';
               const otherMax = calculateMaxBid(otherTeam, nom.playerId);
-              const positionFull =
-                !!player && !!ctx &&
-                state.teams[otherTeam].playerIds.filter((id: string) => ctx.positionOf[id] === player.position).length >=
-                  positionCap(player.position, ctx);
 
               return (
                 <div className="space-y-5">
@@ -584,15 +547,10 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
 
                   {permissions.canAct ? (
                     <div className="space-y-3 max-w-md mx-auto">
-                      {positionFull && player && ctx && (
-                        <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-800 text-center">
-                          Team {otherTeam} already has {positionCap(player.position, ctx)} {player.position} players — the most a side can hold — and can only pass.
-                        </div>
-                      )}
                       <div className="grid grid-cols-2 gap-3">
                         <Button
                           variant="primary"
-                          disabled={positionFull || nom.price + 1 > otherMax}
+                          disabled={nom.price + 1 > otherMax}
                           isLoading={isBidding}
                           onClick={() => handleBid('raise', 1)}
                         >
@@ -600,7 +558,7 @@ export function LiveAuction({ matchday, onFinished }: LiveAuctionProps) {
                         </Button>
                         <Button
                           variant="primary"
-                          disabled={positionFull || nom.price + 5 > otherMax}
+                          disabled={nom.price + 5 > otherMax}
                           isLoading={isBidding}
                           onClick={() => handleBid('raise', 5)}
                         >

@@ -280,6 +280,11 @@ export async function cancelMatchday(id: string) {
   await db.update(matchdays).set({ status: 'cancelled' }).where(eq(matchdays.id, id));
 }
 
+/** Hard delete — matchdayPlayers and draftEvents cascade via their FK. */
+export async function deleteMatchday(id: string) {
+  await db.delete(matchdays).where(eq(matchdays.id, id));
+}
+
 export async function startMatchday(id: string, state: DraftState) {
   const [row] = await db
     .update(matchdays)

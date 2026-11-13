@@ -44,6 +44,13 @@ export function TeamBadge({ team }: { team: Team }) {
 }
 
 export function PriceChip({ price }: { price: number }) {
+  if (price === 0) {
+    return (
+      <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-slate-50 border border-slate-200 text-slate-500 font-semibold text-xs">
+        auto-fill
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-800 font-bold text-xs">
       <Coins className="w-3 h-3 text-amber-600" />

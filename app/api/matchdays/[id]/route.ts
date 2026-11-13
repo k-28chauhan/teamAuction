@@ -5,14 +5,13 @@ import { parseJson } from '@/lib/api/parse';
 import { appError } from '@/lib/api/errors';
 import { serializeMatchday } from '@/lib/api/serialize';
 import { requireUser, requireMaster } from '@/lib/auth/guards';
-import { getMatchdayById, getMatchdayPlayers, updateMatchdaySetup } from '@/lib/db/repo';
-import { createInitialAuctionState } from '@/lib/draft/engine';
-import type { DraftState, Position } from '@/lib/contract/types';
+import { deleteMatchday, getMatchdayById, getMatchdayPlayers, updateMatchdaySetup } from '@/lib/db/repo';
+import { createInitialAuctionState, STARTING_BID } from '@/lib/draft/engine';
+import type { DraftState } from '@/lib/contract/types';
 
 const patchSchema = z.object({
   style: z.enum(['price', 'open']).optional(),
   budget: z.number().int().min(1).optional(),
-  roundOrder: z.array(z.enum(['GK', 'FWD', 'MID', 'DEF'])).optional(),
   leaderAId: z.string().uuid().optional(),
   leaderBId: z.string().uuid().optional(),
 });
@@ -53,35 +52,38 @@ export const PATCH = withErrorBoundary(async (req: NextRequest, ctx: { params: P
   const patchToApply: Parameters<typeof updateMatchdaySetup>[1] = {
     style: patch.style ?? row.style,
     budget: patch.budget ?? row.budget,
-    roundOrder: (patch.roundOrder as Position[] | undefined) ?? row.roundOrder,
     leaderAId,
     leaderBId,
   };
 
   if (row.method === 'auction') {
-    const positionOf: Record<string, Position> = {};
-    const ratingOf: Record<string, number> = {};
-    for (const [userId, entry] of playersByUser) {
-      positionOf[userId] = entry.position;
-      ratingOf[userId] = entry.user.rating;
-    }
     const poolIds = [...playersByUser.keys()].filter((uid) => uid !== leaderAId && uid !== leaderBId);
 
-    const ratings = [...playersByUser.values()].map((entry) => entry.user.rating);
-    const avgRating = ratings.reduce((sum, r) => sum + r, 0) / ratings.length;
     const state: DraftState = createInitialAuctionState({
       leaderAId,
       leaderBId,
       poolIds,
-      budget: patchToApply.budget ?? Math.ceil(row.teamSize * avgRating * 1.5),
+      budget: patchToApply.budget ?? Math.ceil(row.teamSize * STARTING_BID * 1.5),
       teamSize: row.teamSize,
-      roundOrder: patchToApply.roundOrder ?? ['GK', 'FWD', 'MID', 'DEF'],
-      positionOf,
-      ratingOf,
     });
     patchToApply.state = state;
   }
 
   const updated = await updateMatchdaySetup(id, patchToApply);
   return NextResponse.json({ matchday: serializeMatchday(updated!, playersByUser) });
+});
+
+export const DELETE = withErrorBoundary(async (_req: NextRequest, ctx: { params: Promise<{ id: string }> }) => {
+  const caller = await requireUser();
+  requireMaster(caller);
+  const { id } = await ctx.params;
+
+  const row = await getMatchdayById(id);
+  if (!row) throw appError('NOT_FOUND', "That matchday doesn't exist.");
+  if (row.status !== 'completed' && row.status !== 'cancelled') {
+    throw appError('WRONG_PHASE', 'Only a completed or cancelled matchday can be deleted — cancel it first.');
+  }
+
+  await deleteMatchday(id);
+  return NextResponse.json({ ok: true });
 });
